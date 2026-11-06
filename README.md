@@ -1,37 +1,47 @@
 # sidecar
 
-Toggle an iPad on and off as a second display from the command line.
+Connect an iPad as a Sidecar display from the command line.
 
-## Build
+```sh
+sidecar connect       # connect to the first reachable iPad
+sidecar disconnect
+```
+
+Run `sidecar --help` for exit codes.
+
+## Install
+
+Requires macOS on a Mac that supports Sidecar, and the Xcode Command Line Tools
+(`xcode-select --install`). No other dependencies.
 
 ```sh
 swiftc -O sidecar.swift -o ~/.local/bin/sidecar
 ```
 
-No dependencies. macOS only.
-
-## Use
-
-```sh
-sidecar toggle        # connect if off, disconnect if on
-sidecar status        # device name, or "disconnected"
-sidecar devices       # list reachable iPads
-sidecar connect
-sidecar disconnect
-```
-
-Any command takes an optional device name if you have more than one iPad:
-
-```sh
-sidecar toggle "gatlin's ipad"
-```
-
-Matching ignores case, accents and curly-vs-straight apostrophes, and accepts
-any unambiguous substring. `--json` works on `devices` and `status`.
-
-Run `sidecar --help` for the rest, including exit codes.
-
 ## Gotcha
 
-Connecting fails if the iPad is locked or asleep, even though it still shows up
-in `sidecar devices`. Wake and unlock it first. The error says so.
+Connecting fails if the iPad is locked or asleep, even though it is still
+reachable. Wake and unlock it first. The error says so.
+
+## Caveat: private API
+
+There is no public API for Sidecar. This tool drives Apple's private
+`SidecarCore` framework, so **a macOS update can break it at any time**. It was
+last verified on macOS 26.6.2.
+
+When that happens it exits with code 4 and names what is missing, rather than
+crashing. `recon/` has a probe that dumps the framework's current shape, which
+is usually enough to fix it — see `recon/README.md`.
+
+## Contributing
+
+Bug reports and fixes are welcome, especially after a macOS update. Please
+include your macOS version and the exact error.
+
+The tool is intentionally small: it does what its author actually uses. A new
+command is welcome when you have a real need for it, not just because it is
+possible.
+
+## License
+
+[MIT](LICENSE)

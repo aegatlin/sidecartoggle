@@ -11,6 +11,26 @@ There is no public API for this. Assume Apple will eventually break it.
 - Source: `sidecar.swift` (one file, no SwiftPM manifest, no Xcode project)
 - Build: `swiftc -O sidecar.swift -o ~/.local/bin/sidecar`
 - Diagnostics: `recon/` — not built, not shipped. See `recon/README.md`.
+- CI: `.github/workflows/build.yml` compiles on a macOS runner and smoke-tests the
+  exit codes that never reach SidecarCore (help, usage errors). It has no iPad, so it
+  cannot test connect/disconnect. Keep the smoke test in step with `--help`.
+- License: MIT. Open source, not monetized.
+
+## Scope
+
+Deliberately tiny. The owner has one iPad and only ever runs `sidecar connect`
+(disconnecting is usually done from the iPad). The CLI is exactly:
+
+```
+sidecar connect | disconnect | --help
+```
+
+Both commands act on the first device SidecarCore reports. There are no flags, no
+device-name argument, no status/list/toggle commands, no `--json`, and a fixed 15s
+timeout. An earlier version had all of those; they were removed as unused. The
+policy is to add a command only once there is a real need for it, not because it is
+possible. Do not add them back unless asked. If you ever need connection status, `connectedDevices`
+is the mechanism (see below).
 
 ## Architecture
 
@@ -20,12 +40,11 @@ It exposes a typed Swift interface:
 ```swift
 init() throws
 func devices() throws -> [Device]
-func connectedDevices() throws -> [Device]
 func connect(_ device: Device, timeout: TimeInterval) throws
 func disconnect(_ device: Device, timeout: TimeInterval) throws
 ```
 
-`Device` carries `name`, `id`, and a `fileprivate` `NSObject` handle. Nothing outside
+`Device` carries `name` and a `fileprivate` `NSObject` handle. Nothing outside
 that class references `dlopen`, `perform(Selector(...))`, `NSClassFromString`, or the
 framework's existence. **Keep it that way** — the command layer must stay testable and
 free of Objective-C.
@@ -41,20 +60,20 @@ update that renames one is a one-line fix.
 
 | Member | Notes |
 |---|---|
-| `devices` → NSArray | All reachable devices. Includes disconnected ones. |
-| `connectedDevices` → NSArray | **The status mechanism.** Empty when nothing is connected. |
+| `devices` → NSArray | All reachable devices. Includes disconnected ones. **Used.** |
+| `connectedDevices` → NSArray | The status mechanism, if ever needed. Empty when nothing is connected. Not used. |
 | `recentDevices` → NSArray | Not used. |
 | `configForDevice:` → SidecarDisplayConfig | Non-nil only while connected. Not used. |
-| `connectToDevice:completion:` | completion is `@convention(block) (NSError?) -> Void` |
+| `connectToDevice:completion:` | **Used.** completion is `@convention(block) (NSError?) -> Void` |
 | `connectToDevice:withConfig:completion:` | **Deliberately unused** — see Non-goals. |
-| `disconnectFromDevice:completion:` | |
+| `disconnectFromDevice:completion:` | **Used.** |
 
 **`SidecarDevice`**: `name`, `identifier` (NSUUID), `model`, `version`, `deviceType`
 (UTType), `status` (opaque `unsigned long long`), plus camera and capability accessors.
 
 `SidecarDisplayConfig` exists with 22 properties including `transport`. Unused.
 
-## Why `connectedDevices` and not `system_profiler`
+## If status is ever needed: `connectedDevices`, not `system_profiler`
 
 Measured both states against `system_profiler SPDisplaysDataType` ground truth:
 
@@ -65,8 +84,8 @@ Measured both states against `system_profiler SPDisplaysDataType` ground truth:
 | `configForDevice:` | displayID 4 | nil |
 | `status` | `0x8000880302` | `0x880302` |
 
-`connectedDevices` is exact. `system_profiler` costs 1–2s per call, which is
-unacceptable for a hotkey-bound toggle, and is only a fallback if this ever breaks.
+`connectedDevices` is exact. `system_profiler` costs 1–2s per call and is only a
+fallback if this ever breaks.
 
 Bit 39 of `SidecarDevice.status` is evidently the connected flag. **Do not depend on
 it** — it is an undocumented bitfield with no stable meaning.
@@ -82,7 +101,10 @@ forever if the completion block never fires. `SidecarCore.invoke` instead:
 
 1. Installs a 0.05s repeating `Timer` as a run-loop source. Without a source,
    `RunLoop.run(mode:before:)` returns instantly and the loop spins hot on CPU.
-2. Polls a lock-guarded `finished` flag until the deadline.
+2. Polls a lock-guarded `finished` flag until the deadline, running the loop in
+   0.05s slices. Do not pass the full deadline to `run(mode:before:)`: a timer firing
+   does not make it return (only an input source does), so a completion delivered on
+   another queue would go unnoticed until the timeout.
 
 Spinning the run loop rather than blocking the thread means a completion delivered on
 the **main queue** would still land, instead of deadlocking. In practice SidecarCore
@@ -90,31 +112,17 @@ delivers on its own queue, but this costs nothing and removes the failure mode.
 
 **A timed-out connect is not cancelled.** SidecarCore has no cancel API, so the
 connection may still complete a second after exit 5. This is inherent. It is why the
-default timeout is a generous 15s.
-
-## Name matching
-
-`normalize()` folds case, diacritics and width, maps six apostrophe variants
-(`' ' ‛ ＇ ´ \``) to ASCII `'`, and collapses whitespace runs. The real-world case is
-`Joe's iPad` typed against the device's actual `Joe‘s iPad`.
-
-`selectDevice()` prefers an exact normalized match, then an unambiguous substring
-match. It **never guesses** between candidates — multiple matches is exit 3 with the
-candidates listed. Note that substring means `austin's ipad` does *not* match
-`Austin Gatlin's iPad`; that is correct, not a bug.
-
-Bare device names are joined from all non-flag words, so quoting is optional.
+fixed timeout is a generous 15s.
 
 ## Exit codes
 
-`0` success · `1` bad usage · `2` no devices reachable · `3` device not found or
-ambiguous · `4` SidecarCore error **or private API unavailable** · `5` timed out.
+`0` success · `1` bad usage · `2` no devices reachable · `4` SidecarCore error **or
+private API unavailable** · `5` timed out.
 
-Codes 4 and 5 are deliberately merged/kept per the original spec's table. Every code is
-documented in `--help`; do not add an undocumented one.
-
-`status` **always exits 0**, connected or not — scripts rely on this.
-Errors go to stderr, machine-readable output to stdout.
+There is no `3`: it meant "device not found or ambiguous" and went away with name
+matching. The gap is intentional, so the remaining codes keep their meaning. Every code
+is documented in `--help`; do not add an undocumented one. Errors go to stderr,
+the success line (`connected: <name>`) to stdout.
 
 ## Known SidecarCore error codes
 
@@ -133,9 +141,9 @@ Preserve this property.
 
 ## Verified vs unverified
 
-Exercised on real hardware: all read-only commands, `--json` on both, toggle round-trips
-(connect ~1.5s, disconnect ~0.03s), fuzzy name matching, exit 1, exit 3, exit 5, and the
-`-100`/`-102` paths.
+Exercised on real hardware (before the surface was cut down): connect/disconnect
+round-trips (connect ~1.5s, disconnect ~0.03s), exit 1, exit 5, and the `-100`/`-102`
+paths.
 
 **Not yet exercised:** exit 2 (needs Wi-Fi/Bluetooth off) and the `-203` hint (needs a
 locked iPad). The `-203` string is written from the documented behaviour, not observed.
@@ -163,7 +171,7 @@ If you rewrite `recon/probe.swift`, these will bite again:
 Do not add, unless asked: the wired transport (`SidecarDisplayConfig` + `setTransport:`
 value 2 + `connectToDevice:withConfig:completion:`), a GUI, a menu bar item, a launchd
 agent, a login item, an installer script, window-moving logic (Rectangle handles that),
-or any external dependency including ArgumentParser. Arg parsing stays hand-rolled.
+or any external dependency including ArgumentParser.
 
 The binary lives at `~/.local/bin/sidecar`, which is on PATH via `.zshrc`. It is invoked
-manually; there is intentionally no hotkey binding committed to this repo.
+manually.

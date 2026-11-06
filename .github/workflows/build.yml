@@ -1,0 +1,31 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile
+        run: swiftc -O sidecar.swift -o sidecar
+
+      # CI has no iPad, so only the paths that never reach SidecarCore are checked.
+      - name: Smoke test
+        run: |
+          set -u
+          expect() {
+            want=$1; shift
+            set +e; ./sidecar "$@" >/dev/null 2>&1; got=$?; set -e
+            if [ "$got" != "$want" ]; then
+              echo "sidecar $*: expected exit $want, got $got"; exit 1
+            fi
+          }
+          expect 0 --help
+          expect 1
+          expect 1 bogus
+          expect 1 connect extra
